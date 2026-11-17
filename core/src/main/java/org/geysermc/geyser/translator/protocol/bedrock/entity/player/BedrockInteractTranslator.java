@@ -35,10 +35,13 @@ import org.geysermc.geyser.entity.type.Entity;
 import org.geysermc.geyser.entity.type.living.animal.horse.AbstractHorseEntity;
 import org.geysermc.geyser.entity.type.living.animal.nautilus.AbstractNautilusEntity;
 import org.geysermc.geyser.item.Items;
+import org.geysermc.geyser.network.bedrock.SplitscreenEntities;
 import org.geysermc.geyser.session.GeyserSession;
 import org.geysermc.geyser.translator.protocol.PacketTranslator;
 import org.geysermc.geyser.translator.protocol.Translator;
 import org.geysermc.geyser.util.InventoryUtils;
+import org.geysermc.geyser.translator.protocol.bedrock.JavaHandUse;
+import org.geysermc.mcprotocollib.protocol.data.game.entity.player.Hand;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.player.PlayerState;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundAttackPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundInteractPacket;
@@ -51,24 +54,26 @@ public class BedrockInteractTranslator extends PacketTranslator<InteractPacket> 
 
     @Override
     public void translate(GeyserSession session, InteractPacket packet) {
-        Entity entity;
-        if (packet.getRuntimeEntityId() == session.getPlayerEntity().geyserId()) {
-            //Player is not in entity cache
-            entity = session.getPlayerEntity();
-        } else {
-            entity = session.getEntityCache().getEntityByGeyserId(packet.getRuntimeEntityId());
-        }
-        if (entity == null)
+        Entity entity = SplitscreenEntities.find(session, packet.getRuntimeEntityId());
+        if (entity == null) {
+            int javaId = SplitscreenEntities.javaId(session, packet.getRuntimeEntityId());
+            if (javaId >= 0 && packet.getAction() == InteractPacket.Action.DAMAGE) {
+                session.sendDownstreamGamePacket(new ServerboundAttackPacket(javaId));
+                return;
+            }
+            if (javaId >= 0 && packet.getAction() == InteractPacket.Action.INTERACT) {
+                sendEntityUse(session, javaId);
+                return;
+            }
             return;
+        }
 
         switch (packet.getAction()) {
             case INTERACT:
                 if (session.getPlayerInventory().getItemInHand().is(Items.SHIELD)) {
                     break;
                 }
-                ServerboundInteractPacket interactPacket = new ServerboundInteractPacket(entity.getEntityId(),
-                    Vector3d.ZERO, session.isSneaking());
-                session.sendDownstreamGamePacket(interactPacket);
+                sendEntityUse(session, entity.getEntityId());
                 break;
             case DAMAGE:
                 ServerboundAttackPacket attackPacket = new ServerboundAttackPacket(entity.getEntityId());
@@ -103,7 +108,7 @@ public class BedrockInteractTranslator extends PacketTranslator<InteractPacket> 
             case MOUSEOVER:
                 // Handle the buttons for mobile - "Mount", etc; and the suggestions for console - "ZL: Mount", etc
                 if (packet.getRuntimeEntityId() != 0) {
-                    Entity interactEntity = session.getEntityCache().getEntityByGeyserId(packet.getRuntimeEntityId());
+                    Entity interactEntity = SplitscreenEntities.find(session, packet.getRuntimeEntityId());
                     session.setMouseoverEntity(interactEntity);
                     if (interactEntity == null) {
                         return;
@@ -131,5 +136,22 @@ public class BedrockInteractTranslator extends PacketTranslator<InteractPacket> 
                     }
                 }
         }
+    }
+
+    /**
+     * Java's entity use tries the main hand, then the off hand only if the main hand passes.
+     * Food or a name tag in the main hand stops the click. A sword lets the off hand feed.
+     */
+    private static void sendEntityUse(GeyserSession session, int javaId) {
+        session.sendDownstreamGamePacket(new ServerboundInteractPacket(javaId,
+                Hand.MAIN_HAND, Vector3d.ZERO, session.isSneaking()));
+        if (JavaHandUse.entityItemConsumes(session, session.getPlayerInventory().getItemInHand())) {
+            return;
+        }
+        if (!JavaHandUse.entityItemConsumes(session, session.getPlayerInventory().getOffhand())) {
+            return;
+        }
+        session.sendDownstreamGamePacket(new ServerboundInteractPacket(javaId,
+                Hand.OFF_HAND, Vector3d.ZERO, session.isSneaking()));
     }
 }

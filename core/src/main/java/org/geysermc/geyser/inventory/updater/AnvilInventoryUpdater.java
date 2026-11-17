@@ -189,6 +189,11 @@ public class AnvilInventoryUpdater extends InventoryUpdater {
             return itemData;
         }
 
+        // The console refuses the result at 40 levels even when the server allows it.
+        // Show 39 so the take goes through. The server still charges the real cost.
+        if (newRepairCost >= MAX_LEVEL_COST) {
+            newRepairCost = MAX_LEVEL_COST - 1;
+        }
         newRepairCost -= bedrockLevelCost;
         if (newRepairCost == 0) {
             // No change to the repair cost needed

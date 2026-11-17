@@ -210,6 +210,9 @@ public class ItemRegistryPopulator {
                         components = NbtMap.EMPTY;
                     }
                 }
+                if (components != null) {
+                    components = allowHeldInOffhand(components);
+                }
 
                 ItemDefinition definition = new SimpleItemDefinition(entry.getName().intern(), id, ItemVersion.from(entry.getVersion()), entry.isComponentBased(), components);
 
@@ -772,6 +775,28 @@ public class ItemRegistryPopulator {
             .bedrockOptions(CustomItemBedrockOptions.builder().creativeCategory(CreativeCategory.EQUIPMENT))
             .build();
         return CustomItemRegistryPopulator.registerCustomItem(Items.PLAYER_HEAD, playerHeadMapping, definition, protocolId, protocolVersion, firstMappingsPass).itemDefinition();
+    }
+
+    /**
+     * Lets a Bedrock player keep this item in the offhand.
+     * Only an item that already has a component definition is changed. An empty
+     * definition still uses the console's own rules. Writing a new one over a
+     * torch or a sword would remove placing, attacking, and durability.
+     */
+    private static NbtMap allowHeldInOffhand(NbtMap components) {
+        if (components.isEmpty()) {
+            return components;
+        }
+        NbtMap inner = components.getCompound("components");
+        if (inner.isEmpty()) {
+            return components;
+        }
+        NbtMap properties = inner.getCompound("item_properties");
+        NbtMapBuilder propertyBuilder = properties.isEmpty() ? NbtMap.builder() : properties.toBuilder();
+        propertyBuilder.putBoolean("allow_off_hand", true);
+        NbtMapBuilder innerBuilder = inner.toBuilder();
+        innerBuilder.putCompound("item_properties", propertyBuilder.build());
+        return components.toBuilder().putCompound("components", innerBuilder.build()).build();
     }
 
     private static NbtMap fromItemDefinitionToDataDriven(ItemDefinition definition, int maxStackSize, String texture, String displayName, boolean swing) {

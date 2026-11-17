@@ -133,6 +133,7 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
             case COMPLETED -> {
                 finishedResourcePackSending = true;
                 if (geyser.config().java().authType() != AuthType.ONLINE) {
+                    BedrockGuest.apply(session);
                     session.authenticate(session.getAuthData().name());
                 } else if (!couldLoginUserByName(session.getAuthData().name())) {
                     // We must spawn the white world

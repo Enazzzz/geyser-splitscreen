@@ -27,15 +27,83 @@ package org.geysermc.geyser.network.bedrock;
 
 import io.netty.channel.Channel;
 import org.cloudburstmc.protocol.bedrock.BedrockPeer;
+import org.cloudburstmc.protocol.bedrock.BedrockSession;
 import org.cloudburstmc.protocol.bedrock.BedrockSessionFactory;
+import org.cloudburstmc.protocol.bedrock.netty.BedrockPacketWrapper;
+import org.cloudburstmc.protocol.bedrock.packet.SubClientLoginPacket;
+import org.geysermc.geyser.session.GeyserSession;
 
 import java.net.SocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 
 public class GeyserBedrockPeer extends BedrockPeer {
     private SocketAddress proxiedAddress;
+    /**
+     * The controller that opened the connection. Splitscreen sessions copy its
+     * version and client data from here.
+     */
+    private GeyserSession primarySession;
 
     public GeyserBedrockPeer(Channel channel, BedrockSessionFactory sessionFactory) {
         super(channel, sessionFactory);
+    }
+
+    /**
+     * Records the first controller on this connection.
+     */
+    public void setPrimarySession(GeyserSession primarySession) {
+        this.primarySession = primarySession;
+    }
+
+    /**
+     * @return the first controller, or null before its session exists
+     */
+    public GeyserSession primarySession() {
+        return this.primarySession;
+    }
+
+    /**
+     * Routes a packet to the controller that sent it.
+     * The stock peer picks a session by the target id. A PlayStation controller
+     * sends its own id as the sender and addresses the server as the target, so
+     * the second controller would otherwise land on the first player's session.
+     */
+    @Override
+    protected void onBedrockPacket(BedrockPacketWrapper wrapper) {
+        int sender = Byte.toUnsignedInt(wrapper.getSenderSubClientId());
+        int target = Byte.toUnsignedInt(wrapper.getTargetSubClientId());
+        // Any packet from a guest controller belongs to that controller, even when
+        // the target id is not zero. Dropping those was swallowing tame and saddle clicks.
+        if (sender != 0) {
+            BedrockSession existing = this.sessions.get(sender);
+            if (existing == null) {
+                if (!(wrapper.getPacket() instanceof SubClientLoginPacket)) {
+                    return;
+                }
+                existing = this.onSessionCreated(sender);
+                this.sessions.put(sender, existing);
+            }
+            // onPacket is not visible from this package. The handler is already installed.
+            if (existing.getPacketHandler() != null && wrapper.getPacket() != null) {
+                existing.getPacketHandler().handlePacket(wrapper.getPacket());
+            }
+            return;
+        }
+        super.onBedrockPacket(wrapper);
+    }
+
+    /**
+     * The Java sessions riding on this one console connection.
+     */
+    public List<GeyserSession> controllerSessions() {
+        List<GeyserSession> found = new ArrayList<>();
+        for (BedrockSession bedrock : this.sessions.values()) {
+            if (bedrock.getPacketHandler() instanceof LoggingPacketHandler handler) {
+                found.add(handler.session);
+            }
+        }
+        return found;
     }
 
     public SocketAddress getRealAddress() {

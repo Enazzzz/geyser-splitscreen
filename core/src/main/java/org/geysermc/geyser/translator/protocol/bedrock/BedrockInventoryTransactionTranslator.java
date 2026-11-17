@@ -68,6 +68,7 @@ import org.geysermc.geyser.level.block.type.CauldronBlock;
 import org.geysermc.geyser.level.block.type.DoorBlock;
 import org.geysermc.geyser.level.block.type.FlowerPotBlock;
 import org.geysermc.geyser.level.physics.Direction;
+import org.geysermc.geyser.network.bedrock.SplitscreenEntities;
 import org.geysermc.geyser.registry.BlockRegistries;
 import org.geysermc.geyser.session.GeyserSession;
 import org.geysermc.geyser.skin.FakeHeadProvider;
@@ -97,7 +98,9 @@ import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.Serv
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundUseItemOnPacket;
 
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalInt;
+import java.util.WeakHashMap;
 
 /**
  * BedrockInventoryTransactionTranslator handles most interactions between the client and the world,
@@ -105,6 +108,11 @@ import java.util.OptionalInt;
  */
 @Translator(packet = InventoryTransactionPacket.class)
 public class BedrockInventoryTransactionTranslator extends PacketTranslator<InventoryTransactionPacket> {
+
+    /** A second offhand torch click inside this window is the double place. */
+    private static final long OFFHAND_TORCH_DELAY_MS = 200;
+
+    private static final Map<GeyserSession, Long> LAST_OFFHAND_TORCH = new WeakHashMap<>();
 
     @Override
     public void translate(GeyserSession session, InventoryTransactionPacket packet) {
@@ -227,7 +235,7 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                             session.setLastInteractionTime(System.currentTimeMillis());
                         }
 
-                        if (isIncorrectHeldItem(session, packet)) {
+                        if (handFor(session, packet) == null) {
                             BlockUtils.restoreCorrectBlock(session, blockPos, packet.getHotbarSlot());
                             return;
                         }
@@ -318,6 +326,8 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                         // Storing the block position allows inconsistencies in block place checking from post-1.19 - pre-1.20.5 to be resolved.
                         int sequence = session.getWorldCache().nextPredictionSequence();
                         session.getWorldCache().markPositionInSequence(blockPos);
+                        // Java always offers this click to the main hand first. The off hand runs
+                        // only when that hand passes, which is how a sword lets a torch place.
                         ServerboundUseItemOnPacket blockPacket = new ServerboundUseItemOnPacket(
                                 packet.getBlockPosition(),
                                 Direction.getUntrusted(packet, InventoryTransactionPacket::getBlockFace).mcpl(),
@@ -327,6 +337,18 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                                 false,
                                 sequence);
                         session.sendDownstreamGamePacket(blockPacket);
+                        // A door finishes the click. Stone does not, so food, a bow, or a shield
+                        // still needs the air-use packet Java sends after a block click passes.
+                        GeyserItemStack mainHand = session.getPlayerInventory().getItemInHand();
+                        if (!JavaHandUse.blockAnswersEmptyHand(session, blockState) && JavaHandUse.usesInAir(mainHand)) {
+                            if (mainHand.is(Items.SHIELD)) {
+                                session.attemptToBlock();
+                            } else {
+                                session.useItem(Hand.MAIN_HAND);
+                            }
+                        } else if (!JavaHandUse.mainHandConsumes(session, blockState)) {
+                            sendOffhandUse(session, packet, blockState, blockPos, cursorX, cursorY, cursorZ);
+                        }
 
                         Item item = session.getPlayerInventory().getItemInHand().asItem();
                         if (packet.getItemInHand() != null) {
@@ -400,13 +422,16 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                         session.setInteracting(true);
                     }
                     case 1 -> {
-                        if (isIncorrectHeldItem(session, packet)) {
+                        if (handFor(session, packet) == null) {
                             session.getPlayerInventoryHolder().updateSlot(session.getPlayerInventory().getOffsetForHotbar(packet.getHotbarSlot()));
+                            session.getPlayerInventoryHolder().updateSlot(45);
                             break;
                         }
+                        Hand hand = JavaHandUse.handToUse(session, null);
 
-                        // Handled when sneaking
-                        if (session.getPlayerInventory().getItemInHand().is(Items.SHIELD)) {
+                        // The shield starts from the use key on Java, including from the off hand.
+                        if (session.getPlayerInventory().getItemInHand(hand).is(Items.SHIELD)) {
+                            session.attemptToBlock();
                             break;
                         }
 
@@ -424,11 +449,11 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                                 break;
                             } else if (packet.getItemInHand().getDefinition() == session.getItemMappings().getStoredItems().writtenBook().getBedrockDefinition()) {
                                 session.setCurrentBook(packet.getItemInHand());
-                            } else if (session.getPlayerInventory().getItemInHand().is(Items.GOAT_HORN)) {
+                            } else if (session.getPlayerInventory().getItemInHand(hand).is(Items.GOAT_HORN)) {
                                 // Temporary workaround while we don't have full item/block use tracking.
-                                if (!session.getWorldCache().hasCooldown(session.getPlayerInventory().getItemInHand())) {
+                                if (!session.getWorldCache().hasCooldown(session.getPlayerInventory().getItemInHand(hand))) {
                                     Holder<Instrument> component = session.getPlayerInventory()
-                                        .getItemInHand()
+                                        .getItemInHand(hand)
                                         .getComponent(DataComponentTypes.INSTRUMENT);
                                     if (component != null) {
                                         GeyserInstrument instrument = GeyserInstrument.fromComponent(session.javaRegistries(), component);
@@ -453,7 +478,7 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                             }
                         }
 
-                        session.useItem(Hand.MAIN_HAND);
+                        session.useItem(hand);
 
                         session.getBundleCache().awaitRelease();
 
@@ -504,8 +529,17 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
                     return;
                 }
 
-                Entity entity = session.getEntityCache().getEntityByGeyserId(packet.getRuntimeEntityId());
+                Entity entity = SplitscreenEntities.find(session, packet.getRuntimeEntityId());
                 if (entity == null) {
+                    int javaId = SplitscreenEntities.javaId(session, packet.getRuntimeEntityId());
+                    if (javaId >= 0 && session.getGameMode() != GameMode.SPECTATOR && packet.getActionType() == 0) {
+                        // Tame, saddle, name tag, and the other uses are this packet.
+                        for (Hand hand : EntityUtils.HANDS) {
+                            session.sendDownstreamGamePacket(new ServerboundInteractPacket(javaId,
+                                hand, Vector3d.ZERO, session.isSneaking()));
+                        }
+                        return;
+                    }
                     if (session.getGameMode() == GameMode.SPECTATOR) {
                         session.sendDownstreamGamePacket(new ServerboundSpectatorActionPacket(OptionalInt.empty()));
                     }
@@ -560,6 +594,16 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
         Vector3f clickPosition = packet.getClickPosition().sub(entity.bedrockPosition());
         boolean isSpectator = session.getGameMode() == GameMode.SPECTATOR;
         for (Hand hand : EntityUtils.HANDS) {
+            // Java asks the main hand first. The off hand is only told when that hand passes,
+            // so food in the main hand is not followed by a second feed from the off hand.
+            if (hand == Hand.OFF_HAND) {
+                if (JavaHandUse.entityItemConsumes(session, session.getPlayerInventory().getItemInHand())) {
+                    return;
+                }
+                if (!JavaHandUse.entityItemConsumes(session, session.getPlayerInventory().getOffhand())) {
+                    return;
+                }
+            }
             session.sendDownstreamGamePacket(new ServerboundInteractPacket(entity.getEntityId(),
                 hand, Vector3d.from(clickPosition.getX(), clickPosition.getY(), clickPosition.getZ()),
                 session.isSneaking()));
@@ -601,20 +645,6 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
         return ((diffX * diffX) + (diffY * diffY) + (diffZ * diffZ)) < (additionalRangeCheck * additionalRangeCheck);
     }
 
-    private boolean isIncorrectHeldItem(GeyserSession session, InventoryTransactionPacket packet) {
-        int javaSlot = session.getPlayerInventory().getOffsetForHotbar(packet.getHotbarSlot());
-        ItemDefinition expectedItem = ItemTranslator.getBedrockItemDefinition(session, session.getPlayerInventory().getItem(javaSlot));
-        ItemDefinition heldItemId = packet.getItemInHand() == null ? ItemData.AIR.getDefinition() : packet.getItemInHand().getDefinition();
-
-        if (!expectedItem.equals(heldItemId)) {
-            session.getGeyser().getLogger().debug(session.bedrockUsername() + "'s held item has desynced! Expected: " + expectedItem + " Received: " + heldItemId);
-            session.getGeyser().getLogger().debug("Packet: " + packet);
-            return true;
-        }
-
-        return false;
-    }
-
     private boolean useItem(GeyserSession session, InventoryTransactionPacket packet, int blockState, boolean useTouchRotation) {
         // Update the player's inventory to remove any items added by the client itself
         PlayerInventory playerInventory = session.getPlayerInventory();
@@ -652,6 +682,79 @@ public class BedrockInventoryTransactionTranslator extends PacketTranslator<Inve
 
         session.useItem(Hand.MAIN_HAND, useTouchRotation);
         return true;
+    }
+
+    /**
+     * The main hand passed, so the off hand gets the click Java would have given it.
+     */
+    private void sendOffhandUse(GeyserSession session, InventoryTransactionPacket packet, BlockState blockState, Vector3i blockPos, float cursorX, float cursorY, float cursorZ) {
+        GeyserItemStack off = session.getPlayerInventory().getOffhand();
+        if (!JavaHandUse.itemConsumes(session, off, blockState)) {
+            return;
+        }
+        if (JavaHandUse.usesInAir(off)) {
+            if (off.is(Items.SHIELD)) {
+                session.attemptToBlock();
+            } else {
+                session.useItem(Hand.OFF_HAND);
+            }
+            return;
+        }
+        if (isOffhandTorch(off) && torchPlacedTooSoon(session)) {
+            return;
+        }
+        int sequence = session.getWorldCache().nextPredictionSequence();
+        session.getWorldCache().markPositionInSequence(blockPos);
+        ServerboundUseItemOnPacket offhand = new ServerboundUseItemOnPacket(
+                packet.getBlockPosition(),
+                Direction.getUntrusted(packet, InventoryTransactionPacket::getBlockFace).mcpl(),
+                Hand.OFF_HAND,
+                cursorX, cursorY, cursorZ,
+                false,
+                false,
+                sequence);
+        session.sendDownstreamGamePacket(offhand);
+    }
+
+    /** Torches, soul torches, and redstone torches. Other offhand items are left alone. */
+    private static boolean isOffhandTorch(GeyserItemStack stack) {
+        String name = stack.asItem().javaKey().asString();
+        return name.equals("minecraft:torch") || name.endsWith("_torch");
+    }
+
+    /**
+     * True when this session already placed an offhand torch a moment ago.
+     * The PlayStation often sends the same click twice.
+     */
+    private static boolean torchPlacedTooSoon(GeyserSession session) {
+        long now = System.currentTimeMillis();
+        synchronized (LAST_OFFHAND_TORCH) {
+            Long last = LAST_OFFHAND_TORCH.get(session);
+            if (last != null && now - last < OFFHAND_TORCH_DELAY_MS) {
+                return true;
+            }
+            LAST_OFFHAND_TORCH.put(session, now);
+            return false;
+        }
+    }
+
+    /**
+     * The hand the PlayStation actually used. The packet carries that hand's item.
+     * A match with the hotbar wins, so two stacks of the same item still use the main hand.
+     * Null means the item matches neither hand.
+     */
+    private Hand handFor(GeyserSession session, InventoryTransactionPacket packet) {
+        ItemDefinition used = packet.getItemInHand() == null ? ItemData.AIR.getDefinition() : packet.getItemInHand().getDefinition();
+        ItemDefinition mainHand = ItemTranslator.getBedrockItemDefinition(session, session.getPlayerInventory().getItemInHand());
+        if (used.equals(mainHand)) {
+            return Hand.MAIN_HAND;
+        }
+        ItemDefinition offhand = ItemTranslator.getBedrockItemDefinition(session, session.getPlayerInventory().getOffhand());
+        if (used.equals(offhand)) {
+            return Hand.OFF_HAND;
+        }
+        session.getGeyser().getLogger().debug(session.bedrockUsername() + "'s held item has desynced! Main: " + mainHand + " Offhand: " + offhand + " Received: " + used);
+        return null;
     }
 
     /*

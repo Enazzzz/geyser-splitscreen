@@ -100,6 +100,7 @@ import org.cloudburstmc.protocol.bedrock.packet.SetPlayerGameTypePacket;
 import org.cloudburstmc.protocol.bedrock.packet.SetTimePacket;
 import org.cloudburstmc.protocol.bedrock.packet.StartGamePacket;
 import org.cloudburstmc.protocol.bedrock.packet.SyncEntityPropertyPacket;
+import org.cloudburstmc.protocol.bedrock.packet.SetTitlePacket;
 import org.cloudburstmc.protocol.bedrock.packet.TextPacket;
 import org.cloudburstmc.protocol.bedrock.packet.ToastRequestPacket;
 import org.cloudburstmc.protocol.bedrock.packet.TransferPacket;
@@ -200,6 +201,7 @@ import org.geysermc.geyser.skin.SkinManager;
 import org.geysermc.geyser.skin.SkinProvider;
 import org.geysermc.geyser.text.GeyserLocale;
 import org.geysermc.geyser.translator.inventory.InventoryTranslator;
+import org.geysermc.geyser.translator.item.ItemTranslator;
 import org.geysermc.geyser.translator.text.MessageTranslator;
 import org.geysermc.geyser.util.ChunkUtils;
 import org.geysermc.geyser.util.CooldownUtils;
@@ -593,7 +595,8 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource, Jav
     private boolean oldSmithingTable = false;
 
     /**
-     * Whether to use the minecart_improvements experiment
+     * Whether to use the minecart_improvements experiment.
+     * This world leaves that datapack off, so the old movement stays the default.
      */
     @Setter
     private boolean isUsingExperimentalMinecartLogic = false;
@@ -1385,9 +1388,17 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource, Jav
     /**
      * Called every Minecraft tick.
      */
+    /** Non-empty until the old action-bar name has been cleared once. */
+    private String offhandLabel = "clear";
+    /** Last texture path sent to the HUD image. Null until the first update. */
+    private String offhandTexture;
+    /** Ticks since the offhand line was last written. The console fades it, so it is rewritten. */
+    private int offhandLabelTicks;
+
     protected void tick() {
         try {
             inventoryClicksLeft = ClickPlan.MAX_CLICKS_PER_TICK;
+            refreshOffhandLabel(false);
             pistonCache.tick();
 
             worldBorder.tick();
@@ -1465,7 +1476,13 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource, Jav
             this.dialogManager.tick();
             this.waypointCache.tick();
 
-            this.upstream.getSession().getPeer().sendPacketsImmediately(0, 0, queuedImmediatelyPackets.toArray(new BedrockPacket[0]));
+            // Sender 0 is the first controller. Immediate packets (inventories, metadata)
+            // have to name the controller they belong to, or the guest never sees them.
+            int speaker = 0;
+            if (this.upstream.getSession() instanceof org.geysermc.geyser.network.bedrock.SplitscreenServerSession splitscreen) {
+                speaker = splitscreen.controllerId();
+            }
+            this.upstream.getSession().getPeer().sendPacketsImmediately(speaker, 0, queuedImmediatelyPackets.toArray(new BedrockPacket[0]));
             queuedImmediatelyPackets.clear();
 
             CooldownUtils.tickCooldown(this);
@@ -1494,6 +1511,48 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource, Jav
         // (Last verified behavior: Bedrock 1.18.12 / Java 1.18.2)
         setTimePacket.setTime((int) (Math.abs(dayTimeTicks) % (24000 * 8)));
         this.sendUpstreamPacket(setTimePacket);
+    }
+
+    /**
+     * Tells the HUD pack which Bedrock item to draw, and the stack count.
+     * The count is three digits so the pack can peel it off the front of the message.
+     *
+     * @param changed true when the offhand stack just changed
+     */
+    public void refreshOffhandLabel(boolean changed) {
+        if (playerInventoryHolder == null) {
+            return;
+        }
+        if (!changed) {
+            if (++offhandLabelTicks < 30) {
+                return;
+            }
+        }
+        offhandLabelTicks = 0;
+
+        GeyserItemStack stack = playerInventoryHolder.inventory().getOffhand();
+        // Three count digits, then the Bedrock item id the slot renderer draws.
+        String payload = "0000";
+        if (stack != null && !stack.isEmpty()) {
+            int count = Math.min(stack.getAmount(), 999);
+            int aux = ItemTranslator.getBedrockItemDefinition(this, stack).getRuntimeId() << 16;
+            payload = String.format("%03d%d", count, aux);
+        }
+        if (payload.equals(offhandTexture)) {
+            return;
+        }
+        offhandTexture = payload;
+        sendJsonUIData("offhand", payload);
+        // Drop a name that was left on the action bar by the previous build.
+        if (!offhandLabel.isEmpty()) {
+            offhandLabel = "";
+            SetTitlePacket title = new SetTitlePacket();
+            title.setType(SetTitlePacket.Type.ACTIONBAR);
+            title.setText(" ");
+            title.setXuid("");
+            title.setPlatformOnlineId("");
+            sendUpstreamPacket(title);
+        }
     }
 
     public void sendJsonUIData(String key, String value) {

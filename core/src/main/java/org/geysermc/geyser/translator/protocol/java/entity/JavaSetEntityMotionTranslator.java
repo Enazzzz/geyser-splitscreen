@@ -25,10 +25,12 @@
 
 package org.geysermc.geyser.translator.protocol.java.entity;
 
+import org.cloudburstmc.math.vector.Vector3f;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.ClientboundSetEntityMotionPacket;
 import org.cloudburstmc.protocol.bedrock.packet.SetEntityMotionPacket;
 import org.geysermc.geyser.entity.type.Entity;
 import org.geysermc.geyser.entity.type.ItemEntity;
+import org.geysermc.geyser.entity.type.MinecartEntity;
 import org.geysermc.geyser.entity.type.living.animal.horse.AbstractHorseEntity;
 import org.geysermc.geyser.session.GeyserSession;
 import org.geysermc.geyser.translator.protocol.PacketTranslator;
@@ -53,6 +55,20 @@ public class JavaSetEntityMotionTranslator extends PacketTranslator<ClientboundS
         if (entity instanceof ItemEntity) {
             // Don't bother sending entity motion packets for items
             // since the client doesn't seem to care
+            return;
+        }
+
+        // A minecart the player is not riding must not get Java's rail velocity.
+        // The PlayStation runs its own minecart physics on that velocity, so a chest
+        // cart or an empty cart hops and leaves the rail. Position updates still move it.
+        if (entity instanceof MinecartEntity && entity != session.getPlayerEntity().getVehicle()) {
+            if (!entity.getMotion().equals(Vector3f.ZERO)) {
+                entity.setMotion(Vector3f.ZERO);
+                SetEntityMotionPacket clear = new SetEntityMotionPacket();
+                clear.setRuntimeEntityId(entity.geyserId());
+                clear.setMotion(Vector3f.ZERO);
+                session.sendUpstreamPacket(clear);
+            }
             return;
         }
 

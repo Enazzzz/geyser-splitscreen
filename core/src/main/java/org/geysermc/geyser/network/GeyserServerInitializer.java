@@ -37,6 +37,8 @@ import org.geysermc.geyser.GeyserImpl;
 import org.geysermc.geyser.network.bedrock.GeyserBedrockPeer;
 import org.geysermc.geyser.network.bedrock.InvalidPacketHandler;
 import org.geysermc.geyser.network.bedrock.LoginPacketHandler;
+import org.geysermc.geyser.network.bedrock.SplitscreenServerSession;
+import org.geysermc.geyser.network.bedrock.SubClientPacketHandler;
 import org.geysermc.geyser.session.GeyserSession;
 
 /**
@@ -54,17 +56,33 @@ public abstract class GeyserServerInitializer extends BedrockServerInitializer {
         this.eventLoopGroup = new DefaultEventLoopGroup(0, new DefaultThreadFactory(playerThreadName));
     }
 
+    /**
+     * Sessions for extra controllers address packets to that controller.
+     */
+    @Override
+    public BedrockServerSession createSession0(BedrockPeer peer, int subClientId) {
+        return new SplitscreenServerSession(peer, subClientId);
+    }
+
     @Override
     public void initSession(@NonNull BedrockServerSession bedrockServerSession) {
         try {
             bedrockServerSession.setLogging(this.geyser.config().debugMode());
             GeyserSession session = new GeyserSession(this.geyser, bedrockServerSession, this.eventLoopGroup.next());
 
-            if (!bedrockServerSession.isSubClient()) {
-                InvalidPacketHandler handler = bedrockServerSession.getPeer().getChannel().pipeline().get(InvalidPacketHandler.class);
-                if (handler != null) {
-                    handler.setSession(session);
-                }
+            if (bedrockServerSession.isSubClient()) {
+                // Encryption, compression, and the codec already belong to the first controller.
+                bedrockServerSession.setPacketHandler(new SubClientPacketHandler(this.geyser, session));
+                return;
+            }
+
+            if (bedrockServerSession.getPeer() instanceof GeyserBedrockPeer peer) {
+                peer.setPrimarySession(session);
+            }
+
+            InvalidPacketHandler handler = bedrockServerSession.getPeer().getChannel().pipeline().get(InvalidPacketHandler.class);
+            if (handler != null) {
+                handler.setSession(session);
             }
 
             bedrockServerSession.setPacketHandler(new LoginPacketHandler(this.geyser, session));

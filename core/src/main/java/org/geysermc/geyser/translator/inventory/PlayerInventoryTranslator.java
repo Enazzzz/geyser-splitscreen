@@ -187,6 +187,7 @@ public class PlayerInventoryTranslator extends InventoryTranslator<PlayerInvento
             offhandPacket.setContainerId(ContainerId.OFFHAND);
             offhandPacket.setContents(Collections.singletonList(bedrockItem));
             session.sendUpstreamPacket(offhandPacket);
+            session.refreshOffhandLabel(true);
         }
     }
 

@@ -46,6 +46,8 @@ import org.geysermc.geyser.api.block.custom.CustomBlockState;
 import org.geysermc.geyser.entity.type.Entity;
 import org.geysermc.geyser.entity.type.ItemFrameEntity;
 import org.geysermc.geyser.inventory.GeyserItemStack;
+import org.geysermc.geyser.item.Items;
+import org.geysermc.geyser.level.JavaDimension;
 import org.geysermc.geyser.level.block.Blocks;
 import org.geysermc.geyser.level.block.property.Properties;
 import org.geysermc.geyser.level.block.type.Block;
@@ -68,6 +70,7 @@ import org.geysermc.mcprotocollib.protocol.data.game.item.component.AdventureMod
 import org.geysermc.mcprotocollib.protocol.data.game.item.component.DataComponentTypes;
 import org.geysermc.mcprotocollib.protocol.data.game.item.component.ToolData;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundAttackPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundPunchPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundPlayerActionPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundUseItemOnPacket;
 
@@ -166,6 +169,7 @@ public class BlockBreakHandler {
      * @param packet the player auth input packet
      */
     public void handlePlayerAuthInputPacket(PlayerAuthInputPacket packet) {
+        nudgeRoofMining(packet);
         if (packet.getInputData().contains(PlayerAuthInputData.PERFORM_BLOCK_ACTIONS)) {
             handleBlockBreakActions(packet);
             restoredBlocks.clear();
@@ -644,6 +648,68 @@ public class BlockBreakHandler {
         clearCurrentVariables();
         this.lastMinedPosition = null;
         this.destructionStageCache.invalidateAll();
+    }
+
+    /**
+     * The console will not start a normal break on bedrock. While a diamond or
+     * netherite pick is held against nether roof bedrock, keep telling the Java
+     * server that the arm is swinging so the roof can actually come down.
+     */
+    private void nudgeRoofMining(PlayerAuthInputPacket packet) {
+        // Only a real swing. The break-delay flag stays set while a pick is just being held.
+        if (!packet.getInputData().contains(PlayerAuthInputData.MISSED_SWING)) {
+            return;
+        }
+        GeyserItemStack held = session.getPlayerInventory().getItemInHand();
+        if (!held.is(Items.DIAMOND_PICKAXE) && !held.is(Items.NETHERITE_PICKAXE)) {
+            return;
+        }
+        JavaDimension dimension = session.getDimensionType();
+        if (dimension == null || !dimension.isNetherLike()) {
+            return;
+        }
+        if (roofBedrockLookedAt() == null) {
+            return;
+        }
+        session.sendDownstreamGamePacket(ServerboundPunchPacket.INSTANCE);
+    }
+
+    /**
+     * The first solid block along the look direction, when it is nether-roof bedrock.
+     */
+    private Vector3i roofBedrockLookedAt() {
+        Vector3f eye = session.getPlayerEntity().position().up(session.getEyeHeight());
+        float yaw = (float) Math.toRadians(session.getPlayerEntity().getYaw());
+        float pitch = (float) Math.toRadians(session.getPlayerEntity().getPitch());
+        float xStep = (float) (-Math.sin(yaw) * Math.cos(pitch));
+        float yStep = (float) (-Math.sin(pitch));
+        float zStep = (float) (Math.cos(yaw) * Math.cos(pitch));
+        int lastX = Integer.MIN_VALUE;
+        int lastY = Integer.MIN_VALUE;
+        int lastZ = Integer.MIN_VALUE;
+        for (int step = 1; step <= 20; step++) {
+            float distance = step * 0.25f;
+            int x = (int) Math.floor(eye.getX() + xStep * distance);
+            int y = (int) Math.floor(eye.getY() + yStep * distance);
+            int z = (int) Math.floor(eye.getZ() + zStep * distance);
+            if (x == lastX && y == lastY && z == lastZ) {
+                continue;
+            }
+            lastX = x;
+            lastY = y;
+            lastZ = z;
+            BlockState state = session.getGeyser().getWorldManager().blockAt(session, x, y, z);
+            if (state == null) {
+                continue;
+            }
+            if (state.is(Blocks.BEDROCK) && y >= 120 && y <= 127) {
+                return Vector3i.from(x, y, z);
+            }
+            if (!state.is(Blocks.AIR) && !state.is(Blocks.CAVE_AIR) && !state.is(Blocks.VOID_AIR)) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static class BlockPredicateCache {

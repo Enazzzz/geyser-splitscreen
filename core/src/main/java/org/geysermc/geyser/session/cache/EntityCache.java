@@ -90,6 +90,13 @@ public class EntityCache {
 
     public EntityCache(GeyserSession session) {
         this.session = session;
+        // Each splitscreen controller shares one connection. Give the guest its own
+        // runtime ids so a wolf or a saddle click is not applied to the first player.
+        if (session.getUpstream() != null
+                && session.getUpstream().getSession() instanceof org.geysermc.geyser.network.bedrock.SplitscreenServerSession splitscreen
+                && splitscreen.controllerId() > 0) {
+            this.nextEntityId.set(splitscreen.controllerId() * 1_000_000L + 2L);
+        }
     }
 
     public long nextEntityId() {
