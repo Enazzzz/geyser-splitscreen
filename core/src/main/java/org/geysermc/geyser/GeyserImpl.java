@@ -102,6 +102,7 @@ import org.geysermc.geyser.text.GeyserLocale;
 import org.geysermc.geyser.text.MinecraftLocale;
 import org.geysermc.geyser.translator.text.MessageTranslator;
 import org.geysermc.geyser.util.AssetUtils;
+import org.geysermc.geyser.util.MojangAuthWarmup;
 import org.geysermc.geyser.util.CodeOfConductManager;
 import org.geysermc.geyser.util.InternalPlatformType;
 import org.geysermc.geyser.util.JsonUtils;
@@ -222,12 +223,27 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
     }
 
     public void initialize() {
-        // Setup encryption early so we don't start if we can't auth
+        // EncryptionUtils dies for the whole JVM if Mojang discovery times out on first load.
+        // Wait until that URL answers, then load it once.
         if (config().advanced().bedrock().validateBedrockLogin()) {
+            GeyserLogger warmupLogger = bootstrap.getGeyserLogger();
+            int attempt = 0;
+            while (!MojangAuthWarmup.reachable()) {
+                attempt++;
+                warmupLogger.warning("Minecraft auth API is unreachable. Retrying in 10s (attempt "
+                        + attempt + "). Java stays up; Bedrock join waits.");
+                try {
+                    Thread.sleep(10_000L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    this.disable();
+                    return;
+                }
+            }
             try {
                 EncryptionUtils.getMojangPublicKey();
             } catch (Throwable t) {
-                GeyserImpl.getInstance().getLogger().error("Unable to set up encryption! This can be caused by your internet connection or the Minecraft api being unreachable. ", t);
+                GeyserImpl.getInstance().getLogger().error("Unable to set up encryption after the auth API answered. ", t);
                 this.disable();
                 return;
             }
@@ -293,6 +309,7 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
         }
 
         VersionCheckUtils.checkForOutdatedJava(logger);
+        this.setEnabled(true);
     }
 
     private void startInstance() {
@@ -839,10 +856,14 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
 
         if (getInstance().isReloading()) {
             instance.startInstance();
-        } else {
-            instance.initialize();
+            instance.setEnabled(true);
+            return;
         }
-        instance.setEnabled(true);
+
+        // Auth warmup can take minutes if WAN is down. Do not freeze the Paper thread.
+        Thread warmup = new Thread(instance::initialize, "Geyser Auth Warmup");
+        warmup.setDaemon(true);
+        warmup.start();
     }
 
     public GeyserLogger getLogger() {

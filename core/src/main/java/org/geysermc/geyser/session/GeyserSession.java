@@ -1531,12 +1531,13 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource, Jav
         offhandLabelTicks = 0;
 
         GeyserItemStack stack = playerInventoryHolder.inventory().getOffhand();
-        // Three count digits, then the Bedrock item id the slot renderer draws.
-        String payload = "0000";
+        // Four-char count prefix plus comma, then the Bedrock item id.
+        // The HUD strips those four characters so the item id is not changed.
+        String payload = "000,0";
         if (stack != null && !stack.isEmpty()) {
             int count = Math.min(stack.getAmount(), 999);
             int aux = ItemTranslator.getBedrockItemDefinition(this, stack).getRuntimeId() << 16;
-            payload = String.format("%03d%d", count, aux);
+            payload = String.format("%03d,%d", count, aux);
         }
         if (payload.equals(offhandTexture)) {
             return;

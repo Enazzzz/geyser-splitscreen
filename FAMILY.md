@@ -8,7 +8,8 @@ This tree is [GeyserMC/Geyser](https://github.com/GeyserMC/Geyser) plus the patc
 - **Bedrock guest mode** — optional guest login path (`BedrockGuest`).
 - **Java hand order** — main hand first, then offhand, including eating while looking at a block (`JavaHandUse`, inventory / interact translators).
 - **Offhand torch delay** — short cooldown so torches do not double-place.
-- **Offhand HUD signal** — tip-text payload for a companion resource pack that draws a Java-style offhand slot.
+- **Offhand HUD signal** — tip-text payload `geyseropt:offhand:NNN,<item>` for a companion resource pack that draws a Java-style offhand slot.
+- **Auth warmup** — Mojang discovery is probed on a background thread until it answers. A WAN outage no longer poisons `EncryptionUtils` and does not take Bedrock down forever.
 - **Unridden minecarts** — do not forward Java rail velocity to Bedrock for carts the player is not riding.
 - **Anvil display** — Bedrock anvil cost shown under the console refuse threshold.
 
